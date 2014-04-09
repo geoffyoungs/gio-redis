@@ -7,15 +7,24 @@ module Gio
     # Your code goes here...
     def initialize(host = '127.0.0.1', port = 6379, mainloop = nil)
 
-      @addr = Gio::InetSocketAddress.new(Gio::InetAddress.new_from_string(host), port)
-      @sock =  Gio::Socket.new(:ipv4, :stream, :tcp)
+      @addr = Gio::InetSocketAddress.new(inet_address_from_string(host), port)
+      @sock = Gio::Socket.new(:ipv4, :stream, :tcp)
 
       @sock.connect(@addr)
       @sock.set_blocking(false)
 
-      @reader = Hiredis::Reader.new
+      @redis_reader = Hiredis::Reader.new
 
-      @source = @sock.create_source(GLib::IOCondition::IN, &method(:read_response))
+      if defined?(Gio::PollableInputStream)
+        @reader = Gio::UnixInputStream.new(@sock.fd, false)
+        @source = @reader.create_source(&method(:read_response))
+        @writer = Gio::UnixOutputStream.new(@sock.fd, false)
+      else
+        @source = @sock.create_source(GLib::IOCondition::IN, &method(:read_response))
+        @writer = @sock
+        @reader = @sock
+      end
+
       @source.attach
       @pong = false
       @callbacks = {}
@@ -41,6 +50,14 @@ module Gio
     end
 
   private
+    def inet_address_from_string(host)
+      if Gio::InetAddress.respond_to?(:new_from_string)
+        Gio::InetAddress.new_from_string(host)
+      else
+        Gio::InetAddress.new(host)
+      end
+    end
+    
     def call_command(*args)
       command = "*#{args.size}\r\n"
       args.each { |a|
@@ -48,14 +65,18 @@ module Gio
         command << a.to_s
         command << "\r\n"
       }
-      @sock.send command
+      if @writer.respond_to?(:write_nonblocking)
+        @writer.write_nonblocking command
+      else
+        @writer.send command
+      end
     end
 
     def read_response(source=nil, condition=nil)
       while data = read(4096)
-        @reader.feed(data)
+        @redis_reader.feed(data)
 
-        while response = @reader.gets
+        while response = @redis_reader.gets
           case response
           when 'PONG'
             @pong = true
@@ -77,9 +98,17 @@ module Gio
     end
 
     def read(n)
-      @sock.receive(n)
-    rescue Gio::IO::WouldBlockError => e
-      nil
+      if @reader.respond_to?(:read_nonblocking)
+        begin @reader.read_nonblocking(n)
+        rescue Gio::IOError::WouldBlock => e
+          nil
+        end
+      else
+        begin  @reader.receive(n)
+        rescue Gio::IO::WouldBlockError => e
+          nil
+        end
+      end
     end
   end
 end
