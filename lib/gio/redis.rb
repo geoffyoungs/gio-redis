@@ -51,13 +51,18 @@ module Gio
 
   private
     def inet_address_from_string(host)
-      if Gio::InetAddress.respond_to?(:new_from_string)
-        Gio::InetAddress.new_from_string(host)
+      case host
+      when '^(\d+[.]){3}\d+$'
+        if Gio::InetAddress.respond_to?(:new_from_string)
+          Gio::InetAddress.new_from_string(host)
+        else
+          Gio::InetAddress.new(host)
+        end
       else
-        Gio::InetAddress.new(host)
+        Gio::Resolver.default.lookup_by_name(host).first
       end
     end
-    
+
     def call_command(*args)
       command = "*#{args.size}\r\n"
       args.each { |a|
